@@ -2,21 +2,24 @@
 
 Native SwiftUI app built around one rule: **Get something into the app in at most two actions. The app understands and sorts it.**
 
-## v0.2
+## v0.3
 
 - Native iPhone app with SwiftUI
 - Native iOS Share Extension: **Share → Inbox → done**
 - Accepts text, URLs, screenshots/images, PDFs and files
 - On-device OCR with Apple Vision
 - PDF text extraction with PDFKit
-- Keeps the original screenshot/PDF when the App Group is available
+- Keeps the original screenshot/PDF through the shared App Group
 - Automatic sorting into **Braucht dich**, **Demnächst**, **Warten** and **Ablage**
 - Detects euro amounts and common German dates including forms such as `28. August 2026`
 - Detects basic intent such as payment, invoice, reply, appointment, offer and delivery
+- Improved merchant/person extraction: sentence fragments such as `steht an`, `ist fällig` or `bezahlen` are cut away from names
+- Cleaner titles such as **Solakon bezahlen** instead of OCR-derived sentence fragments
+- Compact detail screen with the important facts grouped together
+- Existing saved items are re-analyzed once after updating to the new analyzer version
 - Filters common screenshot/OCR interface noise before analysis
-- Extracts useful context such as merchant/service when possible
-- Raw OCR text is hidden behind details instead of dominating the UI
-- No API key or Cloudflare backend required for v0.2
+- Raw OCR text stays behind details instead of dominating the UI
+- No API key or Cloudflare backend required for v0.3
 
 ## Open and run
 
@@ -28,13 +31,11 @@ Native SwiftUI app built around one rule: **Get something into the app in at mos
 6. Select your iPhone and run **Inbox**.
 7. In Photos, Mail, Safari or Files tap **Share → Inbox**.
 
-If an App Group is unavailable on a development setup, the Share Extension retains a clipboard handoff fallback for testing.
-
 ## Development workflow
 
 - Product/code changes can be committed directly to GitHub.
 - Xcode is still required to compile, sign and install the native iPhone app on a device.
-- After a GitHub update, pull the latest `main` branch in Xcode and run the app again.
+- After a GitHub update, use **Integrate → Pull** in the correctly cloned Xcode project and run the app again.
 - Cloudflare is **not required** for the current local analyzer.
 
 ## When Cloudflare becomes useful
@@ -45,7 +46,7 @@ The intended long-term architecture is hybrid: **fast/private local extraction o
 
 ## Structure
 
-- `Inbox/InboxApp.swift` — assistant-style SwiftUI dashboard and detail UI
+- `Inbox/InboxApp.swift` — assistant-style SwiftUI dashboard and compact detail UI
 - `InboxShareExtension/ShareViewController.swift` — receives shared content, OCR/PDF extraction and direct import
-- `Shared/Shared.swift` — shared data model, App Group storage and semantic rule analyzer
+- `Shared/Shared.swift` — shared data model, App Group storage and local analyzer
 - `inbox.xcodeproj` — app + share-extension targets
