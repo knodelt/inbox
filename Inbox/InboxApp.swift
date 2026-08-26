@@ -39,10 +39,14 @@ final class InboxStore: ObservableObject {
         do {
             items = try SharedInboxStore.loadItems().sorted { $0.createdAt > $1.createdAt }
             lastError = nil
-        } catch { lastError = error.localizedDescription }
+        } catch {
+            lastError = error.localizedDescription
+        }
     }
 
-    func items(in bucket: InboxBucket) -> [InboxItem] { items.filter { $0.bucket == bucket } }
+    func items(in bucket: InboxBucket) -> [InboxItem] {
+        items.filter { $0.bucket == bucket }
+    }
 
     func move(_ item: InboxItem, to bucket: InboxBucket) {
         guard let i = items.firstIndex(where: { $0.id == item.id }) else { return }
@@ -86,11 +90,17 @@ final class InboxStore: ObservableObject {
         persist()
     }
 
-    func attachmentURL(for item: InboxItem) -> URL? { SharedInboxStore.attachmentURL(for: item.attachmentRelativePath) }
+    func attachmentURL(for item: InboxItem) -> URL? {
+        SharedInboxStore.attachmentURL(for: item.attachmentRelativePath)
+    }
 
     private func persist() {
-        do { try SharedInboxStore.saveItems(items); lastError = nil }
-        catch { lastError = error.localizedDescription }
+        do {
+            try SharedInboxStore.saveItems(items)
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
     }
 }
 
@@ -104,122 +114,278 @@ private struct PersonalTeamHandoff: Codable {
 struct ContentView: View {
     @EnvironmentObject private var store: InboxStore
     @State private var selectedItem: InboxItem?
+    @State private var showArchive = false
+
+    private var attentionItems: [InboxItem] {
+        let endTomorrow = Calendar.current.date(byAdding: .day, value: 2, to: Calendar.current.startOfDay(for: Date())) ?? Date()
+        return store.items(in: .now).filter { item in
+            guard let due = item.dueDate else { return true }
+            return due < endTomorrow
+        }
+    }
+
+    private var upcomingItems: [InboxItem] {
+        let endTomorrow = Calendar.current.date(byAdding: .day, value: 2, to: Calendar.current.startOfDay(for: Date())) ?? Date()
+        let futureNow = store.items(in: .now).filter { item in
+            guard let due = item.dueDate else { return false }
+            return due >= endTomorrow
+        }
+        return (futureNow + store.items(in: .later)).sorted {
+            ($0.dueDate ?? .distantFuture) < ($1.dueDate ?? .distantFuture)
+        }
+    }
+
+    private var waitingItems: [InboxItem] { store.items(in: .waiting) }
+    private var archiveItems: [InboxItem] { store.items(in: .archive) }
 
     var body: some View {
         NavigationStack {
             ZStack {
                 Color(.systemGroupedBackground).ignoresSafeArea()
                 ScrollView {
-                    LazyVStack(spacing: 22) {
-                        hero
-                        captureCard
-                        ForEach(InboxBucket.allCases) { bucket in bucketSection(bucket) }
+                    LazyVStack(spacing: 24) {
+                        header
+                        captureBar
+
+                        assistantSection(
+                            title: "Braucht dich",
+                            subtitle: attentionItems.isEmpty ? "Nichts Akutes." : "Das solltest du als Nächstes ansehen.",
+                            icon: "sparkles",
+                            items: attentionItems
+                        )
+
+                        if !upcomingItems.isEmpty {
+                            assistantSection(
+                                title: "Demnächst",
+                                subtitle: "Schon erkannt, aber noch nicht akut.",
+                                icon: "calendar.badge.clock",
+                                items: upcomingItems
+                            )
+                        }
+
+                        if !waitingItems.isEmpty {
+                            assistantSection(
+                                title: "Warten",
+                                subtitle: "Hier ist gerade jemand anderes dran.",
+                                icon: "hourglass",
+                                items: waitingItems
+                            )
+                        }
+
+                        archiveRow
                     }
                     .padding(.horizontal, 18)
-                    .padding(.bottom, 36)
+                    .padding(.bottom, 40)
                 }
                 .refreshable { store.reload() }
             }
             .toolbar(.hidden, for: .navigationBar)
-            .sheet(item: $selectedItem) { item in ItemDetailView(item: item).environmentObject(store) }
+            .sheet(item: $selectedItem) { item in
+                ItemDetailView(item: item).environmentObject(store)
+            }
+            .sheet(isPresented: $showArchive) {
+                ArchiveView(items: archiveItems).environmentObject(store)
+            }
             .alert("Inbox", isPresented: Binding(get: { store.lastError != nil }, set: { if !$0 { store.lastError = nil } })) {
                 Button("OK", role: .cancel) { store.lastError = nil }
-            } message: { Text(store.lastError ?? "") }
+            } message: {
+                Text(store.lastError ?? "")
+            }
         }
     }
 
-    private var hero: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("INBOX").font(.caption.weight(.bold)).tracking(1.8).foregroundStyle(.secondary)
-                Text("Was braucht dich?").font(.system(size: 34, weight: .bold, design: .rounded))
-                Text(heroSubtitle).font(.subheadline).foregroundStyle(.secondary)
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("INBOX")
+                        .font(.caption.weight(.bold))
+                        .tracking(1.8)
+                        .foregroundStyle(.secondary)
+                    Text("Was braucht dich?")
+                        .font(.system(size: 34, weight: .bold, design: .rounded))
+                }
+                Spacer()
+                ZStack {
+                    Circle().fill(.primary).frame(width: 48, height: 48)
+                    Text("\(attentionItems.count)")
+                        .font(.headline.monospacedDigit())
+                        .foregroundStyle(Color(.systemBackground))
+                }
             }
-            Spacer()
-            ZStack {
-                Circle().fill(.primary).frame(width: 48, height: 48)
-                Text("\(store.items(in: .now).count)").font(.headline.monospacedDigit()).foregroundStyle(Color(.systemBackground))
-            }
+            Text(statusText)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
         }
         .padding(.top, 18)
     }
 
-    private var heroSubtitle: String {
-        let count = store.items(in: .now).count
-        if count == 0 { return "Gerade ist nichts dringend." }
-        return count == 1 ? "1 Sache wartet auf deine Aktion." : "\(count) Sachen warten auf deine Aktion."
+    private var statusText: String {
+        if attentionItems.isEmpty && upcomingItems.isEmpty && waitingItems.isEmpty {
+            return "Alles ruhig. Neue Dinge kannst du einfach über Teilen an Inbox schicken."
+        }
+        if attentionItems.count == 1 { return "1 Sache braucht deine Aufmerksamkeit." }
+        if attentionItems.count > 1 { return "\(attentionItems.count) Sachen brauchen deine Aufmerksamkeit." }
+        return "Nichts Akutes. Ich behalte den Rest im Blick."
     }
 
-    private var captureCard: some View {
+    private var captureBar: some View {
         Button { store.captureClipboard() } label: {
-            HStack(spacing: 14) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 14).fill(.thinMaterial).frame(width: 48, height: 48)
-                    Image(systemName: "doc.on.clipboard.fill").font(.title3)
-                }
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Zwischenablage reinwerfen").font(.headline)
-                    Text("1 Tipp · Erkennung und Sortierung automatisch").font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                Image(systemName: "plus")
+                    .font(.headline)
+                    .frame(width: 34, height: 34)
+                    .background(.thinMaterial, in: Circle())
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Schnell hinzufügen").font(.subheadline.weight(.semibold))
+                    Text("Text aus der Zwischenablage").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Image(systemName: "arrow.down.circle.fill").font(.title2)
+                Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
             }
             .foregroundStyle(.primary)
-            .padding(16)
-            .background(RoundedRectangle(cornerRadius: 22).fill(Color(.secondarySystemGroupedBackground)))
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 18).fill(Color(.secondarySystemGroupedBackground)))
         }
         .buttonStyle(.plain)
     }
 
-    @ViewBuilder
-    private func bucketSection(_ bucket: InboxBucket) -> some View {
-        let bucketItems = store.items(in: bucket)
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Label(bucket.title, systemImage: bucket.systemImage).font(.headline)
+    private func assistantSection(title: String, subtitle: String, icon: String, items: [InboxItem]) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Label(title, systemImage: icon).font(.headline)
+                    Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                }
                 Spacer()
-                Text("\(bucketItems.count)").font(.caption.bold()).foregroundStyle(.secondary).padding(.horizontal, 9).padding(.vertical, 4).background(.thinMaterial, in: Capsule())
+                Text("\(items.count)")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(.thinMaterial, in: Capsule())
             }
-            if bucketItems.isEmpty {
-                HStack {
-                    Image(systemName: "checkmark").foregroundStyle(.secondary)
-                    Text(bucket.subtitle).font(.subheadline).foregroundStyle(.secondary)
+
+            if items.isEmpty {
+                HStack(spacing: 10) {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.secondary)
+                    Text("Hier ist gerade nichts zu tun.").font(.subheadline).foregroundStyle(.secondary)
                     Spacer()
                 }
                 .padding(16)
-                .background(RoundedRectangle(cornerRadius: 18).fill(Color(.secondarySystemGroupedBackground)))
+                .background(RoundedRectangle(cornerRadius: 20).fill(Color(.secondarySystemGroupedBackground)))
             } else {
-                ForEach(bucketItems) { item in itemCard(item) }
+                ForEach(items) { item in
+                    itemCard(item)
+                }
             }
         }
     }
 
     private func itemCard(_ item: InboxItem) -> some View {
         Button { selectedItem = item } label: {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .firstTextBaseline) {
-                    Image(systemName: item.sourceType.systemImage).foregroundStyle(.secondary)
-                    Text(item.title).font(.headline).lineLimit(2).multilineTextAlignment(.leading)
-                    Spacer()
-                    if item.needsReview { Image(systemName: "questionmark.circle.fill").foregroundStyle(.orange) }
+            HStack(alignment: .top, spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 14)
+                        .fill(.thinMaterial)
+                        .frame(width: 46, height: 46)
+                    Image(systemName: (item.kind ?? .general).systemImage)
+                        .font(.title3)
                 }
-                Text(item.summary).font(.subheadline).foregroundStyle(.secondary).lineLimit(2).multilineTextAlignment(.leading)
-                HStack(spacing: 8) {
-                    if let amount = item.amount { chip(amount, "eurosign") }
-                    if let due = item.dueDate { chip(due.formatted(date: .abbreviated, time: .omitted), "calendar") }
-                    Spacer()
-                    Text(item.createdAt.formatted(.relative(presentation: .named))).font(.caption2).foregroundStyle(.tertiary)
+
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(item.title)
+                            .font(.headline)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                        Spacer(minLength: 8)
+                        if item.needsReview {
+                            Image(systemName: "questionmark.circle.fill").foregroundStyle(.orange)
+                        }
+                    }
+
+                    if !item.summary.isEmpty {
+                        Text(item.summary)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                    }
+
+                    HStack(spacing: 8) {
+                        if let due = item.dueDate { chip(dueText(due), "calendar") }
+                        if let amount = item.amount { chip(amount, "eurosign") }
+                        Spacer()
+                        Image(systemName: item.sourceType.systemImage)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
                 }
             }
             .foregroundStyle(.primary)
-            .padding(16)
-            .background(RoundedRectangle(cornerRadius: 20).fill(Color(.secondarySystemGroupedBackground)))
+            .padding(15)
+            .background(RoundedRectangle(cornerRadius: 22).fill(Color(.secondarySystemGroupedBackground)))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var archiveRow: some View {
+        Button { showArchive = true } label: {
+            HStack {
+                Label("Ablage", systemImage: "archivebox")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("\(archiveItems.count)").foregroundStyle(.secondary)
+                Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
+            }
+            .foregroundStyle(.primary)
+            .padding(.vertical, 8)
         }
         .buttonStyle(.plain)
     }
 
     private func chip(_ title: String, _ icon: String) -> some View {
-        Label(title, systemImage: icon).font(.caption.weight(.semibold)).padding(.horizontal, 9).padding(.vertical, 6).background(.thinMaterial, in: Capsule())
+        Label(title, systemImage: icon)
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .background(.thinMaterial, in: Capsule())
+    }
+
+    private func dueText(_ date: Date) -> String {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) { return "Heute" }
+        if calendar.isDateInTomorrow(date) { return "Morgen" }
+        return date.formatted(.dateTime.day().month(.abbreviated))
+    }
+}
+
+struct ArchiveView: View {
+    let items: [InboxItem]
+    @EnvironmentObject private var store: InboxStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedItem: InboxItem?
+
+    var body: some View {
+        NavigationStack {
+            List(items) { item in
+                Button { selectedItem = item } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(item.title).font(.headline).foregroundStyle(.primary)
+                        Text(item.summary).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }
+            }
+            .overlay {
+                if items.isEmpty { ContentUnavailableView("Ablage ist leer", systemImage: "archivebox") }
+            }
+            .navigationTitle("Ablage")
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Fertig") { dismiss() } } }
+            .sheet(item: $selectedItem) { item in
+                ItemDetailView(item: item).environmentObject(store)
+            }
+        }
     }
 }
 
@@ -228,44 +394,88 @@ struct ItemDetailView: View {
     @EnvironmentObject private var store: InboxStore
     @Environment(\.dismiss) private var dismiss
     @State private var previewURL: URL?
+    @State private var showRawText = false
 
     var body: some View {
         NavigationStack {
             List {
                 Section {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(item.title).font(.title2.bold())
-                        Text(item.summary).foregroundStyle(.secondary)
-                    }.padding(.vertical, 6)
+                    HStack(alignment: .top, spacing: 14) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 16).fill(.thinMaterial).frame(width: 52, height: 52)
+                            Image(systemName: (item.kind ?? .general).systemImage).font(.title2)
+                        }
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(item.title).font(.title2.bold())
+                            Text(item.summary).foregroundStyle(.secondary)
+                            if item.needsReview {
+                                Label("Bitte kurz prüfen", systemImage: "questionmark.circle")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 5)
                 }
-                Section("Erkannt") {
-                    LabeledContent("Zuordnung", value: item.bucket.title)
+
+                Section("Das habe ich verstanden") {
+                    LabeledContent("Typ", value: (item.kind ?? .general).label)
+                    if let merchant = item.merchant { LabeledContent("Worum geht es", value: merchant) }
+                    if let service = item.service { LabeledContent("Dienst", value: service) }
                     if let amount = item.amount { LabeledContent("Betrag", value: amount) }
-                    if let due = item.dueDate { LabeledContent("Termin", value: due.formatted(date: .long, time: .omitted)) }
-                    LabeledContent("Sicherheit", value: "\(Int(item.confidence * 100)) %")
+                    if let due = item.dueDate { LabeledContent("Fällig", value: due.formatted(date: .long, time: .omitted)) }
+                    LabeledContent("Status", value: item.bucket.title)
                 }
-                if !item.originalText.isEmpty {
-                    Section("Originaltext") { Text(item.originalText).textSelection(.enabled) }
-                }
+
                 Section("Quelle") {
                     Label(item.sourceType.label, systemImage: item.sourceType.systemImage)
-                    if let url = item.sourceURL { Link(destination: url) { Label("Link öffnen", systemImage: "safari") } }
+                    if let url = item.sourceURL {
+                        Link(destination: url) { Label("Link öffnen", systemImage: "safari") }
+                    }
                     if let attachment = store.attachmentURL(for: item) {
-                        Button { previewURL = attachment } label: { Label("Original öffnen", systemImage: "doc") }
+                        Button { previewURL = attachment } label: {
+                            Label("Original öffnen", systemImage: "doc")
+                        }
+                    }
+                    if !item.originalText.isEmpty {
+                        DisclosureGroup("Erkannten Text anzeigen", isExpanded: $showRawText) {
+                            Text(item.originalText)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .padding(.top, 8)
+                        }
                     }
                 }
-                Section("Verschieben") {
+
+                Section("Falls ich falsch lag") {
                     ForEach(InboxBucket.allCases) { bucket in
-                        Button { store.move(item, to: bucket); dismiss() } label: { Label(bucket.title, systemImage: bucket.systemImage) }.disabled(bucket == item.bucket)
+                        Button {
+                            store.move(item, to: bucket)
+                            dismiss()
+                        } label: {
+                            Label(bucket.title, systemImage: bucket.systemImage)
+                        }
+                        .disabled(bucket == item.bucket)
                     }
                 }
+
                 Section {
-                    Button(role: .destructive) { store.delete(item); dismiss() } label: { Label("Löschen", systemImage: "trash") }
+                    Button(role: .destructive) {
+                        store.delete(item)
+                        dismiss()
+                    } label: {
+                        Label("Löschen", systemImage: "trash")
+                    }
                 }
             }
             .navigationTitle("Eingang")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Fertig") { dismiss() } } }
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Fertig") { dismiss() }
+                }
+            }
             .sheet(isPresented: Binding(get: { previewURL != nil }, set: { if !$0 { previewURL = nil } })) {
                 if let previewURL { QuickLookPreview(url: previewURL).ignoresSafeArea() }
             }
@@ -275,11 +485,17 @@ struct ItemDetailView: View {
 
 private struct QuickLookPreview: UIViewControllerRepresentable {
     let url: URL
+
     func makeCoordinator() -> Coordinator { Coordinator(url: url) }
+
     func makeUIViewController(context: Context) -> QLPreviewController {
-        let controller = QLPreviewController(); controller.dataSource = context.coordinator; return controller
+        let controller = QLPreviewController()
+        controller.dataSource = context.coordinator
+        return controller
     }
+
     func updateUIViewController(_ uiViewController: QLPreviewController, context: Context) {}
+
     final class Coordinator: NSObject, QLPreviewControllerDataSource {
         let url: URL
         init(url: URL) { self.url = url }
