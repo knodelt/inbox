@@ -29,9 +29,12 @@ final class InboxStore: ObservableObject {
 
     private let handoffPrefix = "INBOX_PERSONAL_TEAM_V1:"
     private let lastHandoffKey = "InboxLastPersonalTeamHandoffID"
+    private let analyzerVersionKey = "InboxAnalyzerVersion"
+    private let analyzerVersion = 3
 
     init() {
         reload()
+        refreshOldAnalysisIfNeeded()
         importPendingShareHandoff()
     }
 
@@ -92,6 +95,30 @@ final class InboxStore: ObservableObject {
 
     func attachmentURL(for item: InboxItem) -> URL? {
         SharedInboxStore.attachmentURL(for: item.attachmentRelativePath)
+    }
+
+    private func refreshOldAnalysisIfNeeded() {
+        guard UserDefaults.standard.integer(forKey: analyzerVersionKey) < analyzerVersion else { return }
+        guard !items.isEmpty else {
+            UserDefaults.standard.set(analyzerVersion, forKey: analyzerVersionKey)
+            return
+        }
+
+        items = items.map { old in
+            guard !old.originalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return old }
+            var refreshed = ContentAnalyzer.analyze(
+                text: old.originalText,
+                sourceType: old.sourceType,
+                sourceURL: old.sourceURL,
+                attachmentRelativePath: old.attachmentRelativePath,
+                now: old.createdAt
+            )
+            refreshed.id = old.id
+            refreshed.createdAt = old.createdAt
+            return refreshed
+        }
+        persist()
+        UserDefaults.standard.set(analyzerVersion, forKey: analyzerVersionKey)
     }
 
     private func persist() {
@@ -402,12 +429,20 @@ struct ItemDetailView: View {
                 Section {
                     HStack(alignment: .top, spacing: 14) {
                         ZStack {
-                            RoundedRectangle(cornerRadius: 16).fill(.thinMaterial).frame(width: 52, height: 52)
-                            Image(systemName: (item.kind ?? .general).systemImage).font(.title2)
+                            RoundedRectangle(cornerRadius: 15)
+                                .fill(.thinMaterial)
+                                .frame(width: 48, height: 48)
+                            Image(systemName: (item.kind ?? .general).systemImage)
+                                .font(.title3)
                         }
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(item.title).font(.title2.bold())
-                            Text(item.summary).foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(item.title)
+                                .font(.title3.bold())
+                            if !item.summary.isEmpty {
+                                Text(item.summary)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
                             if item.needsReview {
                                 Label("Bitte kurz prüfen", systemImage: "questionmark.circle")
                                     .font(.caption.weight(.semibold))
@@ -415,27 +450,50 @@ struct ItemDetailView: View {
                             }
                         }
                     }
-                    .padding(.vertical, 5)
+                    .padding(.vertical, 2)
                 }
 
-                Section("Das habe ich verstanden") {
-                    LabeledContent("Typ", value: (item.kind ?? .general).label)
-                    if let merchant = item.merchant { LabeledContent("Worum geht es", value: merchant) }
-                    if let service = item.service { LabeledContent("Dienst", value: service) }
-                    if let amount = item.amount { LabeledContent("Betrag", value: amount) }
-                    if let due = item.dueDate { LabeledContent("Fällig", value: due.formatted(date: .long, time: .omitted)) }
-                    LabeledContent("Status", value: item.bucket.title)
+                Section("Erkannt") {
+                    if let merchant = item.merchant {
+                        compactFact(icon: "building.2", label: "Worum geht es", value: merchant)
+                    }
+
+                    HStack(spacing: 16) {
+                        compactColumn(label: "Typ", value: (item.kind ?? .general).label)
+                        Divider()
+                        compactColumn(label: "Status", value: item.bucket.title)
+                    }
+                    .padding(.vertical, 3)
+
+                    if item.amount != nil || item.dueDate != nil {
+                        HStack(spacing: 16) {
+                            if let amount = item.amount {
+                                compactColumn(label: "Betrag", value: amount)
+                            }
+                            if item.amount != nil && item.dueDate != nil { Divider() }
+                            if let due = item.dueDate {
+                                compactColumn(label: "Fällig", value: due.formatted(.dateTime.day().month(.wide).year()))
+                            }
+                        }
+                        .padding(.vertical, 3)
+                    }
+
+                    if let service = item.service {
+                        compactFact(icon: "creditcard", label: "Dienst", value: service)
+                    }
                 }
 
                 Section("Quelle") {
-                    Label(item.sourceType.label, systemImage: item.sourceType.systemImage)
+                    HStack {
+                        Label(item.sourceType.label, systemImage: item.sourceType.systemImage)
+                        Spacer()
+                        if let attachment = store.attachmentURL(for: item) {
+                            Button("Original") { previewURL = attachment }
+                                .buttonStyle(.borderless)
+                        }
+                    }
                     if let url = item.sourceURL {
                         Link(destination: url) { Label("Link öffnen", systemImage: "safari") }
-                    }
-                    if let attachment = store.attachmentURL(for: item) {
-                        Button { previewURL = attachment } label: {
-                            Label("Original öffnen", systemImage: "doc")
-                        }
                     }
                     if !item.originalText.isEmpty {
                         DisclosureGroup("Erkannten Text anzeigen", isExpanded: $showRawText) {
@@ -480,6 +538,28 @@ struct ItemDetailView: View {
                 if let previewURL { QuickLookPreview(url: previewURL).ignoresSafeArea() }
             }
         }
+    }
+
+    private func compactFact(icon: String, label: String, value: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .foregroundStyle(.secondary)
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label).font(.caption).foregroundStyle(.secondary)
+                Text(value).font(.body.weight(.semibold))
+            }
+            Spacer()
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func compactColumn(label: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.body.weight(.semibold)).lineLimit(2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
