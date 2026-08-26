@@ -135,10 +135,19 @@ enum ContentAnalyzer {
 
         let bucket: InboxBucket
         let confidence: Double
-        if waiting >= 2 && waiting >= action { bucket = .waiting; confidence = min(0.96, 0.72 + Double(waiting) * 0.05) }
-        else if action >= 2 || [.payment, .invoice, .reply, .appointment, .offer].contains(kind) && due != nil { bucket = .now; confidence = min(0.97, 0.72 + Double(action) * 0.045) }
-        else if later >= 1 { bucket = .later; confidence = min(0.92, 0.72 + Double(later) * 0.06) }
-        else { bucket = .archive; confidence = analysisText.isEmpty ? 0.45 : 0.70 }
+        if waiting >= 2 && waiting >= action {
+            bucket = .waiting
+            confidence = min(0.96, 0.72 + Double(waiting) * 0.05)
+        } else if action >= 2 || ([.payment, .invoice, .reply, .appointment, .offer].contains(kind) && due != nil) {
+            bucket = .now
+            confidence = min(0.97, 0.72 + Double(action) * 0.045)
+        } else if later >= 1 {
+            bucket = .later
+            confidence = min(0.92, 0.72 + Double(later) * 0.06)
+        } else {
+            bucket = .archive
+            confidence = analysisText.isEmpty ? 0.45 : 0.70
+        }
 
         let title = makeTitle(kind: kind, merchant: merchant, bucket: bucket, text: analysisText, sourceURL: sourceURL)
         let summary = makeSummary(kind: kind, merchant: merchant, service: service, amount: amount, due: due, text: analysisText, sourceURL: sourceURL)
@@ -170,7 +179,8 @@ enum ContentAnalyzer {
     private static func cleanOCR(_ text: String) -> String {
         let noise = Set([
             "posteingang", "entwürfe", "entwuerfe", "gesendet", "papierkorb", "zurück", "zurueck",
-            "antworten", "weiterleiten", "mehr", "bearbeiten", "fertig", "abbrechen", "mail", "safari"
+            "antworten", "weiterleiten", "mehr", "bearbeiten", "fertig", "abbrechen", "mail", "safari",
+            "markieren", "bewegen", "löschen", "loeschen", "archivieren"
         ])
 
         let kept = text.split(whereSeparator: \.isNewline).compactMap { rawLine -> String? in
@@ -187,7 +197,7 @@ enum ContentAnalyzer {
     }
 
     private static func detectKind(in text: String) -> InboxKind {
-        if text.contains("bezahlen") || text.contains("überweisen") || text.contains("zahlung") || text.contains("zahlbar") { return .payment }
+        if text.contains("bezahlen") || text.contains("überweisen") || text.contains("zahlung") || text.contains("zahlbar") || text.contains("bezahle") { return .payment }
         if text.contains("rechnung") { return .invoice }
         if text.contains("antwort") || text.contains("rückmeldung") || text.contains("zurückschreiben") { return .reply }
         if text.contains("termin") || text.contains("reservierung") { return .appointment }
@@ -204,9 +214,11 @@ enum ContentAnalyzer {
 
     private static func detectMerchant(in text: String) -> String? {
         let patterns = [
-            #"(?i)bestellung\s+bei\s+([A-ZÄÖÜ][A-Za-zÄÖÜäöüß0-9&.\- ]{1,38})"#,
-            #"(?i)(?:rechnung|angebot|zahlung)\s+(?:von|bei|an)\s+([A-ZÄÖÜ][A-Za-zÄÖÜäöüß0-9&.\- ]{1,38})"#,
-            #"(?i)(?:händler|haendler|anbieter):?\s+([A-ZÄÖÜ][A-Za-zÄÖÜäöüß0-9&.\- ]{1,38})"#
+            #"(?i)bestellung\s+bei\s+([^\n]{2,60})"#,
+            #"(?i)(?:rechnung|angebot|zahlung)\s+(?:von|bei|an|für|fuer)\s+([^\n]{2,60})"#,
+            #"(?i)(?:händler|haendler|anbieter):?\s+([^\n]{2,60})"#,
+            #"(?i)(?:zahlung|rechnung|bestellung)[^\n]{0,30}?(?:für|fuer|bei|von|an)\s+([^\n]{2,60})"#,
+            #"(?i)(?:bezahlen|bezahle|überweisen|ueberweisen)\s+(?:an|bei|für|fuer)?\s*([^\n]{2,60})"#
         ]
 
         for pattern in patterns {
@@ -214,12 +226,56 @@ enum ContentAnalyzer {
             let range = NSRange(text.startIndex..<text.endIndex, in: text)
             guard let match = regex.firstMatch(in: text, range: range), match.numberOfRanges > 1,
                   let r = Range(match.range(at: 1), in: text) else { continue }
-            let value = String(text[r])
-                .components(separatedBy: .newlines).first?
-                .trimmingCharacters(in: CharacterSet(charactersIn: " .,:;–—-")) ?? ""
-            if !value.isEmpty { return String(value.prefix(40)) }
+            let rawCandidate = String(text[r])
+            if let candidate = sanitizeMerchantCandidate(rawCandidate), !isLikelyService(candidate) {
+                return candidate
+            }
+        }
+
+        return detectMerchantFromLines(in: text)
+    }
+
+    private static func sanitizeMerchantCandidate(_ raw: String) -> String? {
+        var value = raw
+            .trimmingCharacters(in: CharacterSet(charactersIn: " .,:;–—-•"))
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+
+        let stopPattern = #"(?i)\s+(?:steht|ist|sind|wird|werden|muss|musst|soll|sollst|kann|kannst|hat|haben|fällig|faellig|bezahlen|zahlen|überweisen|ueberweisen|bis|am|zum|heute|morgen|jetzt|noch|bereits|offen|ausstehend)\b.*$"#
+        value = value.replacingOccurrences(of: stopPattern, with: "", options: .regularExpression)
+        value = value.components(separatedBy: CharacterSet(charactersIn: ".,;:!?|•")).first ?? value
+        value = value.trimmingCharacters(in: CharacterSet(charactersIn: " .,:;–—-•"))
+
+        let words = value.split(separator: " ")
+        guard !words.isEmpty, words.count <= 6, value.count >= 2, value.count <= 42 else { return nil }
+
+        let bad = ["deine", "dein", "ihre", "ihr", "zahlung", "rechnung", "bestellung", "betrag", "euro", "fällig", "faellig"]
+        let lower = value.lowercased()
+        if bad.contains(lower) { return nil }
+        if value.allSatisfy({ $0.isNumber || $0.isWhitespace || ",.€".contains($0) }) { return nil }
+
+        return value
+    }
+
+    private static func detectMerchantFromLines(in text: String) -> String? {
+        let lines = text.split(whereSeparator: \.isNewline).map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+        for line in lines {
+            guard line.count >= 2, line.count <= 36 else { continue }
+            let lower = line.lowercased()
+            if detectAmount(in: line) != nil { continue }
+            if detectService(in: line) != nil { continue }
+            if ["zahlung", "rechnung", "bestellung", "fällig", "faellig", "bezahlen", "klarna"].contains(where: lower.contains) { continue }
+            if firstMatch(#"^\d"#, line) != nil { continue }
+            let letters = line.filter(\.isLetter)
+            guard letters.count >= 3 else { continue }
+            if let first = letters.first, first.isUppercase {
+                return sanitizeMerchantCandidate(line)
+            }
         }
         return nil
+    }
+
+    private static func isLikelyService(_ value: String) -> Bool {
+        ["klarna", "paypal", "amazon", "dhl", "ups", "dpd", "hermes"].contains(value.lowercased())
     }
 
     private static func score(_ text: String, _ phrases: [String]) -> Int {
@@ -308,13 +364,13 @@ enum ContentAnalyzer {
         case .payment:
             return name.map { "\($0) bezahlen" } ?? "Zahlung erledigen"
         case .invoice:
-            return name.map { "Rechnung von \($0)" } ?? "Rechnung prüfen"
+            return name.map { "Rechnung von \($0) prüfen" } ?? "Rechnung prüfen"
         case .reply:
             return bucket == .waiting ? "Auf Rückmeldung warten" : (name.map { "\($0) antworten" } ?? "Antworten")
         case .appointment:
             return name.map { "Termin mit \($0)" } ?? "Termin klären"
         case .offer:
-            return name.map { "Angebot von \($0)" } ?? "Angebot prüfen"
+            return name.map { "Angebot von \($0) prüfen" } ?? "Angebot prüfen"
         case .delivery:
             return name.map { "Lieferung von \($0)" } ?? "Lieferung verfolgen"
         case .document:
@@ -330,16 +386,11 @@ enum ContentAnalyzer {
     private static func makeSummary(kind: InboxKind, merchant: String?, service: String?, amount: String?, due: Date?, text: String, sourceURL: URL?) -> String {
         var parts: [String] = []
         if let service { parts.append(service) }
-        if let merchant {
-            switch kind {
-            case .payment, .invoice: parts.append("bei \(merchant)")
-            case .offer: parts.append("von \(merchant)")
-            default: if service == nil { parts.append(merchant) }
-            }
-        }
         if let amount { parts.append(amount) }
-        if let due { parts.append("fällig \(due.formatted(date: .abbreviated, time: .omitted))") }
+        if let due { parts.append("fällig \(due.formatted(.dateTime.day().month(.abbreviated)))") }
+
         if !parts.isEmpty { return parts.joined(separator: " · ") }
+        if let merchant { return merchant }
         if let line = bestContentLine(in: text) { return String(line.prefix(150)) }
         return sourceURL?.absoluteString ?? "Automatisch erkannt"
     }
