@@ -13,7 +13,10 @@ struct InboxApp: App {
             ContentView()
                 .environmentObject(store)
                 .onChange(of: scenePhase) { _, phase in
-                    if phase == .active { store.reload() }
+                    if phase == .active {
+                        store.importPendingShareHandoff()
+                        store.reload()
+                    }
                 }
         }
     }
@@ -24,7 +27,13 @@ final class InboxStore: ObservableObject {
     @Published private(set) var items: [InboxItem] = []
     @Published var lastError: String?
 
-    init() { reload() }
+    private let handoffPrefix = "INBOX_PERSONAL_TEAM_V1:"
+    private let lastHandoffKey = "InboxLastPersonalTeamHandoffID"
+
+    init() {
+        reload()
+        importPendingShareHandoff()
+    }
 
     func reload() {
         do {
@@ -52,7 +61,28 @@ final class InboxStore: ObservableObject {
             lastError = "In der Zwischenablage ist gerade kein Text."
             return
         }
+        if text.hasPrefix(handoffPrefix) {
+            importPendingShareHandoff()
+            return
+        }
         items.insert(ContentAnalyzer.analyze(text: text, sourceType: .text), at: 0)
+        persist()
+    }
+
+    func importPendingShareHandoff() {
+        guard let raw = UIPasteboard.general.string, raw.hasPrefix(handoffPrefix) else { return }
+        let encoded = String(raw.dropFirst(handoffPrefix.count))
+        guard let data = Data(base64Encoded: encoded),
+              let payload = try? JSONDecoder().decode(PersonalTeamHandoff.self, from: data) else { return }
+
+        let id = payload.id.uuidString
+        guard UserDefaults.standard.string(forKey: lastHandoffKey) != id else { return }
+
+        let sourceType = InboxSourceType(rawValue: payload.sourceType) ?? .text
+        let sourceURL = payload.sourceURL.flatMap(URL.init(string:))
+        let item = ContentAnalyzer.analyze(text: payload.text, sourceType: sourceType, sourceURL: sourceURL)
+        items.insert(item, at: 0)
+        UserDefaults.standard.set(id, forKey: lastHandoffKey)
         persist()
     }
 
@@ -62,6 +92,13 @@ final class InboxStore: ObservableObject {
         do { try SharedInboxStore.saveItems(items); lastError = nil }
         catch { lastError = error.localizedDescription }
     }
+}
+
+private struct PersonalTeamHandoff: Codable {
+    let id: UUID
+    let text: String
+    let sourceType: String
+    let sourceURL: String?
 }
 
 struct ContentView: View {
